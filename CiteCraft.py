@@ -11,6 +11,7 @@ from datetime import date as datetime_date
 # Globaler Cache
 parsed_files_cache = {}
 citations_db = {}
+replace_cit = None
 
 def md5_hash(string, length=15):
     # Generiere den MD5 Hash
@@ -60,25 +61,32 @@ def add_to_citations_db(citation_info, prefix='', postfix=''):
         prefix = escape_latex(prefix)
         postfix = escape_latex(postfix)
         
-        # Fußnoten spezifischen Fußnotenzähler definieren und initialisieren
         formatted_citation = f"\n"
+        # Fußnoten spezifischen Fußnotenzähler definieren und initialisieren
         formatted_citation += f"\\newcounter{{fn{hash_key}}}\n"
         formatted_citation += f"\\setcounter{{fn{hash_key}}}{{0}}\n"
+        
+        # Fußnoten spezifischen Labelzähler definieren und initialisieren
+        formatted_citation += f"\\newcounter{{lb{hash_key}}}\n"
+        formatted_citation += f"\\setcounter{{lb{hash_key}}}{{0}}\n"
         
         # Fußnoten spezifischen Seitenzähler definieren und initialisieren
         formatted_citation += f"\\newcounter{{pg{hash_key}}}\n"
         formatted_citation += f"\\setcounter{{pg{hash_key}}}{{0}}\n"
         
         formatted_citation += (f'\\newcommand{{\{hash_key}}}{{%\n'
-                               f' \\ifnum\\value{{pg{hash_key}}}=\\value{{page}}%\n'
-                               f'  \\hyperlink{{tg{hash_key}}}{{\\footnotemark[\\thefn{hash_key}]{{}}}}%\n'
+                               f' \\label{{{hash_key}\\thelb{hash_key}}}%\n'
+                               f' \\setconditionalpageref{{{hash_key}\\thelb{hash_key}}}%\n'
+                               f' \\ifnum\\value{{pg{hash_key}}}=\\value{{conditionalPageRef}}%\n'
+                               f'  \\hyperlink{{tg{hash_key}\\thefn{hash_key}}}{{\\footnotemark[\\thefn{hash_key}]{{}}}}%\n'
                                f' \else%\n'
                                f'  \stepcounter{{footnote}}%\n'
-                               f'  \\footnotetext[\\thefootnote]{{\\vadjust pre{{\\hypertarget{{tg{hash_key}}}{{}}}}{prefix}{citation_info}{postfix}}}%\n'
-                               f'  \setcounter{{pg{hash_key}}}{{\\value{{page}}}}%\n'
+                               f'  \setcounter{{pg{hash_key}}}{{\\value{{conditionalPageRef}}}}%\n'
                                f'  \setcounter{{fn{hash_key}}}{{\\thefootnote}}%\n'
-                               f'  \\hyperlink{{tg{hash_key}}}{{\\footnotemark[\\thefn{hash_key}]{{}}}}%\n'
+                               f'  \\footnotetext[\\thefootnote]{{\\vadjust pre{{\\hypertarget{{tg{hash_key}\\thefn{hash_key}}}{{}}}}{prefix}{citation_info}{postfix}}}%\n'
+                               f'  \\hyperlink{{tg{hash_key}\\thefn{hash_key}}}{{\\footnotemark[\\thefn{hash_key}]{{}}}}%\n'
                                f' \\fi%\n'
+                               f' \\stepcounter{{lb{hash_key}}}%\n'
                                f'}}%\n')
 
         formatted_citation = "\n".join(line.lstrip() for line in formatted_citation.splitlines())
@@ -164,95 +172,116 @@ def construct_citation(parsed_yaml):
     # Formatierung des Zitatstrings
     return f"{date} - von {sender} - {title}"
 
-def parse_wikilink(elem, doc):
-    if isinstance(elem, pf.Str):
-        pattern_with_quotes = re.compile(r'([^\s\n]*)„\[\[(.*?)#(\^\w*?)\|(.*?)\]\]“([^\s\n]*)')
-        pattern_without_quotes = re.compile(r'([^\s\n]*)\[\[(.*?)#(\^\w*?)\|(.*?)\]\]([^\s\n]*)')
-        
-        match_with_quotes = pattern_with_quotes.search(elem.text)
-        match_without_quotes = pattern_without_quotes.search(elem.text)
-        
-        #debug_text = match_without_quotes
-        #return [pf.Str(debug_text)]
-        
-        pretext = ""
-        posttext = ""
-        
-        
-        if match_with_quotes:
-            pretext = match_with_quotes.group(1)
-            file = match_with_quotes.group(2)
-            target = match_with_quotes.group(3)
-            text = match_with_quotes.group(4)
-            posttext = match_with_quotes.group(5)
+def write_to_file(content, file_path):
+    with open(file_path, 'a', encoding='utf-8') as file:
+        file.write(content + '\n')
 
-        elif match_without_quotes:
-            pretext = match_without_quotes.group(1)
-            file = match_without_quotes.group(2)
-            target = match_without_quotes.group(3)
-            text = None  # Setze text auf None, wenn kein Text vorhanden ist
-            posttext = match_without_quotes.group(5)
+#elem.url = URL
+#elem.content = TEXT
+
+def parse_wikilinks(elem, doc):
+    global replace_cit
+    if isinstance(elem, pf.Link) and elem.title == 'wikilink':
+        container = []
+        link_text = pf.stringify(elem.content)
+        link_url = elem.url
+    
+        if link_text != "^" and link_text != "°":
+            text = pf.convert_text(pf.stringify(elem.content), input_format="markdown")
+            for element in text:
+                if isinstance(element, pf.Para):
+                    for inner_element in element.content:
+                        container.append(inner_element)  # Füge nur den Inhalt des Para-Elements hinzu
+                else:
+                    #container.append(element)
+                    pass
         else:
-            return elem  # Wenn kein passendes Muster gefunden wurde, gebe das Element unverändert zurück
+            text = None
         
-        pretext = escape_latex(pretext)
-        posttext = escape_latex(posttext)
+        
+        url_pattern = re.compile(r'(.*?)#(\^\w*)')
+        url_match = url_pattern.search(link_url)
+        
+        if url_match:
+            file = url_match.group(1)
+            target = url_match.group(2)
+        else:
+            return elem
+        
         
         metadata_file_path = get_metadata_file_path(file)
         if os.path.isfile(metadata_file_path):
             # Parsen von YAML-Header und Markdown-Tags
             yaml_header, tags_targets_dict = parse_document(metadata_file_path)
 
-            # Konstruiere Zitat-Informationen aus YAML-Header
-            citation_info = construct_citation(yaml_header) if yaml_header else "YAML-HeaderNichtGefunden"
+            if yaml_header:
+                # Konstruiere Zitat-Informationen aus YAML-Header
+                citation_info = construct_citation(yaml_header)
+            else:
+                return elem
 
             # Finde die entsprechenden Tags für das Target
-            citation_tag = tags_targets_dict.get(target, 'ZitatstelleNichtGefunden')
+            citation_tag = tags_targets_dict.get(target, None)
 
             # Erstelle den Debug-Text einschließlich des tags_targets_dict
-            if text:
-                if citation_tag != 'ZitatstelleNichtGefunden':
+            if text != None:
+                if citation_tag != None:
                     hash_key = add_to_citations_db(citation_info, postfix=citation_tag)
-                    text = escape_latex(text)
-                    debug_text = f'„{text}“\\{hash_key}{{}}'
                 else:
                     hash_key = add_to_citations_db(citation_info)
-                    text = escape_latex(text)
-                    debug_text = f'„{text}“\\{hash_key}{{}}'
+                   
+                latex = f'\\{hash_key}{{}}'
+                replace_cit = pf.RawInline(latex, format='latex')
+                return container
                 
             else:
-                if citation_tag != 'ZitatstelleNichtGefunden':
+                if citation_tag != None:
                     hash_key = add_to_citations_db(citation_info, "vgl.", citation_tag)
-                    debug_text = f'\\{hash_key}{{}}'
                 else:
                     hash_key = add_to_citations_db(citation_info, prefix="vgl.")
-                    debug_text = f'\\{hash_key}{{}}'
                 
-#            if text:
-#                if citation_tag != 'ZitatstelleNichtGefunden':
-#                    debug_text = f'„{text}“\\footcite[{citation_tag}]{{{hash_key}}}'
-#                else:
-#                    debug_text = f'„{text}“\\footcite[][]{{{hash_key}}}'
-#                
-#            else:
-#                if citation_tag != 'ZitatstelleNichtGefunden':
-#                    debug_text = f'\\footcite[vgl.][{citation_tag}]{{{hash_key}}}'
-#                else:
-#                    debug_text = f'\\footcite[vgl.][]{{{hash_key}}}'
-            
-            return [pf.RawInline(pretext + debug_text + posttext, format='latex')]
+                latex = f'\\{hash_key}{{}}'
+                return [pf.RawInline(latex, format='latex')]
         else:
-            debug_text = f'Datei nicht gefunden: {metadata_file_path}'
+            return elem
+    elif replace_cit != None and isinstance(elem, pf.Str) and elem.text.startswith("“"):
+        container = []
+        
+        text = elem.text
+        quote_mark = text[0]
+        remaining_text = text[1:]
+        
+        container.append(pf.Str(quote_mark))
+        container.append(replace_cit)
+        container.append(pf.Str(remaining_text))
 
-        # Füge den Debug-Text als LaTeX-Ausgabe ein
-        return [pf.Str(debug_text)]
+        replace_cit = None
+        return container
+    
     return elem
 
+def wrap_paragraphs_in_samepage(elem, doc):
+    if isinstance(elem, pf.Para):
+        #write_to_file(f"Para: {elem}", "C:\\Users\\maxim\\Working\\debug.txt")
+        # Überprüfen, ob eines der Kinder ein RawInline-Element ist und den Key enthält
+        for child in elem.content:
+            if isinstance(child, pf.RawInline) and any(key in child.text for key in citations_db):
+                # Erstelle einen neuen Container für den Absatz
+                new_content = [pf.RawInline('\\begin{samepage}', format='latex')]
+                new_content.extend(elem.content)
+                new_content.append(pf.RawInline('\par\\end{samepage}', format='latex'))
 
+                # Ersetze den ursprünglichen Absatz mit dem neuen Inhalt
+                return pf.Para(*new_content)
+    return elem
 
 def main(doc=None):
+    # Leere die Debug-Datei zu Beginn
+    #open("C:\\Users\\maxim\\Working\\debug.txt", 'w').close()
+
     doc = pf.load()
-    doc = pf.run_filter(parse_wikilink, doc=doc)
+    doc = pf.run_filter(parse_wikilinks, doc=doc)
+    #doc = pf.run_filter(wrap_paragraphs_in_samepage, doc=doc)
     doc = output_citations(doc)
     pf.dump(doc)
 
