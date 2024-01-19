@@ -6,8 +6,6 @@ import os
 import yaml
 from datetime import date as datetime_date
 
-
-
 # Globaler Cache
 parsed_files_cache = {}
 citations_db = {}
@@ -45,12 +43,15 @@ def escape_latex(s):
 
 
 
-def add_to_citations_db(citation_info, prefix='', postfix=''):
+def add_to_citations_db(citation_info, prefix='', citation_tag='', postfix=''):
     global citations_db
     # Escape LaTeX special characters
 
-    hash_key = md5_hash(f"{prefix} {citation_info} {postfix}")
+    hash_key = md5_hash(f"{prefix} {citation_info} {citation_tag} {postfix}")
     if hash_key not in citations_db:
+        if citation_tag:
+            citation_tag = ", " + citation_tag
+
         if postfix:
             postfix = ", " + postfix
         
@@ -58,6 +59,7 @@ def add_to_citations_db(citation_info, prefix='', postfix=''):
             prefix = prefix + " "
         
         citation_info = escape_latex(citation_info)
+        citation_tag = escape_latex(citation_tag)
         prefix = escape_latex(prefix)
         postfix = escape_latex(postfix)
         
@@ -83,7 +85,7 @@ def add_to_citations_db(citation_info, prefix='', postfix=''):
                                f'  \stepcounter{{footnote}}%\n'
                                f'  \setcounter{{pg{hash_key}}}{{\\value{{conditionalPageRef}}}}%\n'
                                f'  \setcounter{{fn{hash_key}}}{{\\thefootnote}}%\n'
-                               f'  \\footnotetext[\\thefootnote]{{\\vadjust pre{{\\hypertarget{{tg{hash_key}\\thefn{hash_key}}}{{}}}}{prefix}{citation_info}{postfix}}}%\n'
+                               f'  \\footnotetext[\\thefootnote]{{\\vadjust pre{{\\hypertarget{{tg{hash_key}\\thefn{hash_key}}}{{}}}}{prefix}{citation_info}{citation_tag}{postfix}}}%\n'
                                f'  \\hyperlink{{tg{hash_key}\\thefn{hash_key}}}{{\\footnotemark[\\thefn{hash_key}]{{}}}}%\n'
                                f' \\fi%\n'
                                f' \\stepcounter{{lb{hash_key}}}%\n'
@@ -97,8 +99,20 @@ def add_to_citations_db(citation_info, prefix='', postfix=''):
 
     
 def output_citations(doc):
-    citations_str = ''.join(citations_db.values())
-    doc.metadata['citations-in-preamble'] = pf.MetaInlines(pf.RawInline(citations_str, format='latex'))
+    preamble = r'% + CiteCraft preamble + %' + '\n'
+    preamble += r'\usepackage{hyperref}%' + '\n'
+    preamble += r'\usepackage{fnpct}%' + '\n'
+    preamble += r'\usepackage{refcount}%' + '\n'
+    preamble += r'\usepackage{etoolbox}%' + '\n'
+    preamble += r'\newcounter{conditionalPageRef}%' + '\n'
+    preamble += r'\newcommand{\setconditionalpageref}[1]{%' + '\n'
+    preamble += r'\ifnumgreater{\getpagerefnumber{#1}}{0}%' + '\n'
+    preamble += r'{\setcounter{conditionalPageRef}{\getpagerefnumber{#1}}}%' + '\n'
+    preamble += r'{\setcounter{conditionalPageRef}{\value{page}}}%' + '\n'
+    preamble += r'}%' + '\n'
+    preamble += ''.join(citations_db.values())
+    preamble += r'% - CiteCraft preamble - %' + '\n'
+    doc.metadata['CiteCraft-Preamble'] = pf.MetaInlines(pf.RawInline(preamble, format='latex'))
 
     return doc
 
@@ -129,13 +143,13 @@ def parse_document(file_path):
         markdown_content = content[yaml_header_str.end():]  # Der Rest des Inhalts nach dem YAML-Header
 
     # Suche nach dem TAGS-Abschnitt und extrahiere Tags und das dazugehörige Target
-    tags_targets = re.findall(r'^>%%TAGS%%\n(.*?)\n(\^.*?)\n', markdown_content, re.MULTILINE | re.DOTALL)
+    tags_targets = re.findall(r'^>(?:%%TAGS%%|Stelle:)\n(.*?)\n(\^.*?)\n', markdown_content, re.MULTILINE | re.DOTALL)
     
     tags_targets_dict = {}
 
     for tags, target in tags_targets:
-        # Entferne führende `>` Zeichen und splitte die Tags bei Kommas
-        tag_list = [tag.strip() for tag in tags.split(',')]
+        # Entferne führende `>` Zeichen und splitte die Tags bei Semikolons
+        tag_list = [tag.strip() for tag in tags.split(';')]
         # Zuordnung des ersten Tags, der mit '##' beginnt, zum Target
         if tag_list:
             # Entferne das '##' und das abschließende Komma, falls vorhanden
@@ -151,8 +165,12 @@ def parse_document(file_path):
 def construct_citation(parsed_yaml):
     # Versuche, das Feld 'citationTitle' zu holen
     citation_title = parsed_yaml.get('citationTitle')
+    citation_title_postfix = parsed_yaml.get('citationTitlePostfix')
+    # if not citation_title_postfix
+    if citation_title_postfix is None:
+        citation_title_postfix = ''
     if citation_title:
-        return citation_title
+        return (citation_title, citation_title_postfix)
 
     # Ansonsten setze die Felder 'date', 'title' und 'sender' zusammen
     date_obj = parsed_yaml.get('date', None)
@@ -216,17 +234,17 @@ def parse_wikilinks(elem, doc):
 
             if yaml_header:
                 # Konstruiere Zitat-Informationen aus YAML-Header
-                citation_info = construct_citation(yaml_header)
+                citation_info, postfix = construct_citation(yaml_header)
             else:
                 return elem
 
             # Finde die entsprechenden Tags für das Target
             citation_tag = tags_targets_dict.get(target, None)
 
-            # Erstelle den Debug-Text einschließlich des tags_targets_dict
+            # Erstelle den Text einschließlich der Stelle
             if text != None:
                 if citation_tag != None:
-                    hash_key = add_to_citations_db(citation_info, postfix=citation_tag)
+                    hash_key = add_to_citations_db(citation_info, citation_tag=citation_tag, postfix=postfix)
                 else:
                     hash_key = add_to_citations_db(citation_info)
                    
@@ -236,7 +254,7 @@ def parse_wikilinks(elem, doc):
                 
             else:
                 if citation_tag != None:
-                    hash_key = add_to_citations_db(citation_info, "vgl.", citation_tag)
+                    hash_key = add_to_citations_db(citation_info, prefix="vgl.", citation_tag=citation_tag, postfix=postfix)
                 else:
                     hash_key = add_to_citations_db(citation_info, prefix="vgl.")
                 
@@ -262,7 +280,6 @@ def parse_wikilinks(elem, doc):
 
 def wrap_paragraphs_in_samepage(elem, doc):
     if isinstance(elem, pf.Para):
-        #write_to_file(f"Para: {elem}", "C:\\Users\\maxim\\Working\\debug.txt")
         # Überprüfen, ob eines der Kinder ein RawInline-Element ist und den Key enthält
         for child in elem.content:
             if isinstance(child, pf.RawInline) and any(key in child.text for key in citations_db):
@@ -276,12 +293,10 @@ def wrap_paragraphs_in_samepage(elem, doc):
     return elem
 
 def main(doc=None):
-    # Leere die Debug-Datei zu Beginn
-    #open("C:\\Users\\maxim\\Working\\debug.txt", 'w').close()
 
     doc = pf.load()
     doc = pf.run_filter(parse_wikilinks, doc=doc)
-    #doc = pf.run_filter(wrap_paragraphs_in_samepage, doc=doc)
+
     doc = output_citations(doc)
     pf.dump(doc)
 
